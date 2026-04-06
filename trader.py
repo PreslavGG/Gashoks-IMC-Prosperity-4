@@ -7,11 +7,7 @@ POSITION_LIMITS = {
     "EMERALDS": 80,
 }
 
-class EmeraldsTrader:
-
-    FAIR_VALUE = 10000
-    POS_LIMIT = 80
-
+class ProductTrader:
     def __init__(self, state: TradingState) -> None:
         self.product = "EMERALDS"
         self.state = state
@@ -20,8 +16,8 @@ class EmeraldsTrader:
         self.bids = self.order_depth.buy_orders
         self.asks = self.order_depth.sell_orders
         self.orders: List[Order] = []
-        self.max_buy = self.POS_LIMIT - self.position
-        self.max_sell = self.POS_LIMIT + self.position
+        self.mid = self.calculate_mid()
+        self.best_bid, self.best_ask = self.get_best_bid_ask()
 
     def calculate_mid(self) -> float:
         avg_bid, avg_ask = 0, 0
@@ -41,21 +37,59 @@ class EmeraldsTrader:
 
         return (avg_bid + avg_ask) / 2
     
-    def run(self) -> List[Order]:
-        mid = self.calculate_mid()
+    def get_best_bid_ask(self):
+        
+        best_bid = best_ask = None
 
-        for price, volume in self.asks.items():
-            if price < mid and self.max_buy > 0:
-                qty = min(abs(volume), self.max_buy)
-                self.orders.append(Order(self.product, price, qty))
-                self.max_buy -= qty
-        
-        for price, volume in self.bids.items():
-            if price > mid and self.max_sell > 0:
-                qty = min(volume, self.max_sell)
-                self.orders.append(Order(self.product, price, -qty))
-                self.max_sell -= qty
-        
+        try:
+            if len(self.bids) > 0:
+                best_bid = max(self.bids.keys())
+            if len(self.asks) > 0:
+                best_ask = min(self.asks.keys())
+        except: pass
+
+        return best_bid, best_ask
+
+class EmeraldsTrader(ProductTrader):
+
+    FAIR_VALUE = 10000
+    POS_LIMIT = 80
+
+    def __init__(self, state: TradingState) -> None:
+        super(EmeraldsTrader, self).__init__(state)
+        self.max_buy = self.POS_LIMIT - self.position
+        self.max_sell = self.POS_LIMIT + self.position
+
+    def run(self) -> List[Order]:
+        ## Market Making ##
+        best_bid, best_ask = self.best_bid, self.best_ask
+
+        if best_bid is None or best_ask is None:
+            return []
+
+        # current spread
+        spread = best_ask - best_bid
+
+        # only trade if spread is wide enough
+        if spread <= 1:
+               return []
+
+        # improve the market
+        my_bid = best_bid + 1
+        my_ask = best_ask - 1
+
+        # BUY (place bid)
+        if self.max_buy > 0:
+            qty = min(10, self.max_buy)
+            print(f"BID {qty} @ {my_bid}")
+            self.orders.append(Order(self.product, my_bid, qty))
+
+        # SELL (place ask)
+        if self.max_sell > 0:
+            qty = min(10, self.max_sell)
+            print(f"ASK {qty} @ {my_ask}")
+            self.orders.append(Order(self.product, my_ask, -qty))
+
         return self.orders
 
 
