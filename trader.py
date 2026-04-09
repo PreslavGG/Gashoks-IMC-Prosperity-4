@@ -1,340 +1,334 @@
 import json
 import jsonpickle
-from datamodel import OrderDepth, UserId, TradingState, Order
-from typing import List, Dict
+from datamodel import Listing, Observation, OrderDepth, UserId, TradingState, Order, ProsperityEncoder, Symbol, Trade
+from typing import Any, List, Optional
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  LOGGER  (visualizer-compatible)
+# ═══════════════════════════════════════════════════════════════════════════
 
 class Logger:
-    def __init__(self):
-        self.prints = {}
+    def __init__(self) -> None:
+        self.logs = ""
+        self.max_log_length = 3750
 
-    def log(self, product: str, kind: str, message):
-        group = self.prints.get(product, {})
-        group[kind] = message
-        self.prints[product] = group
+    def print(self, *objects: Any, sep: str = " ", end: str = "\n") -> None:
+        self.logs += sep.join(map(str, objects)) + end
 
-    def flush(self):
-        print(json.dumps(self.prints))
-        self.prints = {}
+    def flush(self, state: TradingState, orders: dict[Symbol, list[Order]], conversions: int, trader_data: str) -> None:
+        base_length = len(self.to_json([self.compress_state(state, ""), self.compress_orders(orders), conversions, "", ""]))
+        max_item_length = (self.max_log_length - base_length) // 3
+        print(self.to_json([
+            self.compress_state(state, self.truncate(state.traderData, max_item_length)),
+            self.compress_orders(orders),
+            conversions,
+            self.truncate(trader_data, max_item_length),
+            self.truncate(self.logs, max_item_length),
+        ]))
+        self.logs = ""
+
+    def compress_state(self, state: TradingState, trader_data: str) -> list[Any]:
+        return [state.timestamp, trader_data, self.compress_listings(state.listings),
+                self.compress_order_depths(state.order_depths), self.compress_trades(state.own_trades),
+                self.compress_trades(state.market_trades), state.position, self.compress_observations(state.observations)]
+
+    def compress_listings(self, listings: dict[Symbol, Listing]) -> list[list[Any]]:
+        return [[l.symbol, l.product, l.denomination] for l in listings.values()]
+
+    def compress_order_depths(self, order_depths: dict[Symbol, OrderDepth]) -> dict[Symbol, list[Any]]:
+        return {s: [od.buy_orders, od.sell_orders] for s, od in order_depths.items()}
+
+    def compress_trades(self, trades: dict[Symbol, list[Trade]]) -> list[list[Any]]:
+        return [[t.symbol, t.price, t.quantity, t.buyer, t.seller, t.timestamp]
+                for arr in trades.values() for t in arr]
+
+    def compress_observations(self, observations: Observation) -> list[Any]:
+        conversion_observations = {
+            p: [o.bidPrice, o.askPrice, o.transportFees, o.exportTariff, o.importTariff, o.sugarPrice, o.sunlightIndex]
+            for p, o in observations.conversionObservations.items()
+        }
+        return [observations.plainValueObservations, conversion_observations]
+
+    def compress_orders(self, orders: dict[Symbol, list[Order]]) -> list[list[Any]]:
+        return [[o.symbol, o.price, o.quantity] for arr in orders.values() for o in arr]
+
+    def to_json(self, value: Any) -> str:
+        return json.dumps(value, cls=ProsperityEncoder, separators=(",", ":"))
+
+    def truncate(self, value: str, max_length: int) -> str:
+        lo, hi, out = 0, min(len(value), max_length), ""
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate = value[:mid] + ("..." if mid < len(value) else "")
+            if len(json.dumps(candidate)) <= max_length:
+                out = candidate
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return out
 
 logger = Logger()
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  BASE PRODUCT TRADER
+#  Subclasses configure via class constants and override fair_value() only.
+#  Adding a new product = new subclass + config + optional fair_value().
+# ═══════════════════════════════════════════════════════════════════════════
+
 class ProductTrader:
 
-    POS_LIMIT: int  # must be defined in each subclass
+    # ── Must define in each subclass ──────────────────────────────────────
+    PRODUCT: str
+    POS_LIMIT: int
 
-    def __init__(self, state: TradingState, product: str) -> None:
-        self.product = product
+    # ── Market-making params (override per product as needed) ─────────────
+    MAKE_SIZE: int          = 20    # lots per passive quote side
+    MIN_EDGE: int           = 3     # min ticks of edge from fair value
+    SKEW_THRESHOLD: float   = 0.4   # skew starts at this fraction of limit
+    MAX_SKEW_OFFSET: int    = 2     # max tick shift for inventory skew
+
+    def __init__(self, state: TradingState) -> None:
         self.state = state
-        self.order_depth = state.order_depths[self.product]
-        self.position = state.position.get(self.product, 0)
-        self.bids = self.order_depth.buy_orders    # {price: +volume}
-        self.asks = self.order_depth.sell_orders    # {price: -volume}
+        self.order_depth = state.order_depths[self.PRODUCT]
+        self.position = state.position.get(self.PRODUCT, 0)
+
+        # Sort order book levels explicitly (not guaranteed in live engine)
+        self.bids: dict[int, int] = self.order_depth.buy_orders   # price → +qty
+        self.asks: dict[int, int] = self.order_depth.sell_orders  # price → -qty
+
         self.orders: List[Order] = []
-        self.best_bid, self.best_ask = self.get_best_bid_ask()
-        self.bid_wall, self.ask_wall, self.wall_mid = self.get_walls()
-        self.max_buy = self.POS_LIMIT - self.position
+        self.max_buy  = self.POS_LIMIT - self.position
         self.max_sell = self.POS_LIMIT + self.position
-        self.skew = self.position / self.POS_LIMIT if self.POS_LIMIT else 0
-        self.log("pos", self.position)
-        self.log("skew", round(self.skew, 2))
+        self.skew     = self.position / self.POS_LIMIT if self.POS_LIMIT else 0
+
+        self.best_bid: Optional[int]
+        self.best_ask: Optional[int]
+        self.best_bid, self.best_ask = self._best_bid_ask()
+
+        bid_wall, ask_wall = self._walls()
+        self.bid_wall: Optional[int] = bid_wall
+        self.ask_wall: Optional[int] = ask_wall
+        self.wall_mid: Optional[float] = (
+            (bid_wall + ask_wall) / 2 if bid_wall is not None and ask_wall is not None else None
+        )
+
+        self._log_state()
+
+    # ── Logging helpers ───────────────────────────────────────────────────
 
     def log(self, kind: str, message):
-        logger.log(self.product, kind, message)
+        logger.print(f"[{self.PRODUCT}] {kind}: {message}")
 
-    def get_best_bid_ask(self):
-        best_bid = max(self.bids.keys()) if self.bids else None
-        best_ask = min(self.asks.keys()) if self.asks else None
+    def _log_state(self):
+        self.log("pos",  self.position)
+        self.log("skew", round(self.skew, 2))
+        bid_wall, ask_wall, wall_mid = self.bid_wall, self.ask_wall, self.wall_mid
+        if wall_mid is not None and bid_wall is not None and ask_wall is not None:
+            self.log("wall_mid", round(wall_mid, 1))
+            self.log("wall_spread", int(ask_wall - bid_wall))
+
+    # ── Order book helpers ────────────────────────────────────────────────
+
+    def _best_bid_ask(self) -> tuple[Optional[int], Optional[int]]:
+        best_bid = max(self.bids) if self.bids else None
+        best_ask = min(self.asks) if self.asks else None
         return best_bid, best_ask
 
-    def get_walls(self):
+    def _walls(self) -> tuple[Optional[int], Optional[int]]:
+        """Outermost (deepest) price levels — used as fair value anchors."""
+        bid_wall = min(self.bids) if self.bids else None
+        ask_wall = max(self.asks) if self.asks else None
+        return bid_wall, ask_wall
+
+    # ── Fair value ────────────────────────────────────────────────────────
+
+    def fair_value(self) -> Optional[float]:
         """
-        The 'wall' is the deepest (outermost) price level in the order book,
-        where the market-maker bots post large resting volume.
-        Wall mid = (bid_wall + ask_wall) / 2 is our fair value proxy.
+        Override in subclasses to use a different fair value estimate.
+        Default: wall_mid (outermost bid/ask average).
         """
-        bid_wall = min(self.bids.keys()) if self.bids else None
-        ask_wall = max(self.asks.keys()) if self.asks else None
-        wall_mid = None
-        if bid_wall is not None and ask_wall is not None:
-            wall_mid = (bid_wall + ask_wall) / 2
-        return bid_wall, ask_wall, wall_mid
+        return self.wall_mid
+
+    # ── Capacity helpers ──────────────────────────────────────────────────
+
+    def _buy(self, price: int, qty: int, tag: str = "buy"):
+        """Place a buy order and decrement remaining capacity."""
+        qty = max(0, min(qty, self.max_buy))
+        if qty > 0:
+            self.orders.append(Order(self.PRODUCT, price, qty))
+            self.max_buy -= qty
+            self.log(tag, f"{qty}@{price}")
+
+    def _sell(self, price: int, qty: int, tag: str = "sell"):
+        """Place a sell order and decrement remaining capacity."""
+        qty = max(0, min(qty, self.max_sell))
+        if qty > 0:
+            self.orders.append(Order(self.PRODUCT, price, -qty))
+            self.max_sell -= qty
+            self.log(tag, f"{qty}@{price}")
+
+    FLATTEN_THRESHOLD: float = 0.25  # only flatten at fv when |skew| exceeds this
+
+    # ── Shared taking logic ───────────────────────────────────────────────
+
+    def take_orders(self, fv: float):
+        """
+        Take any order book level that crosses fair value.
+        Also flatten inventory at fair value when position is large enough.
+        """
+        for ask_price in sorted(self.asks):
+            ask_vol = abs(self.asks[ask_price])
+            if ask_price <= fv - 1:
+                self._buy(ask_price, ask_vol, "take_buy")
+            elif ask_price <= fv and self.position < 0 and abs(self.skew) > self.FLATTEN_THRESHOLD:
+                qty = min(ask_vol, abs(self.position))
+                self._buy(ask_price, qty, "flatten_buy")
+
+        for bid_price in sorted(self.bids, reverse=True):
+            bid_vol = abs(self.bids[bid_price])
+            if bid_price >= fv + 1:
+                self._sell(bid_price, bid_vol, "take_sell")
+            elif bid_price >= fv and self.position > 0 and abs(self.skew) > self.FLATTEN_THRESHOLD:
+                qty = min(bid_vol, self.position)
+                self._sell(bid_price, qty, "flatten_sell")
+
+    # ── Shared making logic ───────────────────────────────────────────────
+
+    def make_orders(self, fv: float):
+        """Post passive quotes around fair value with inventory skew."""
+        if self.best_bid is None or self.best_ask is None:
+            return
+        bid_wall, ask_wall, wall_mid = self.bid_wall, self.ask_wall, self.wall_mid
+        if bid_wall is None or ask_wall is None or wall_mid is None:
+            return
+
+        # Base quotes: overbid best bid / undercut best ask for queue priority
+        my_bid = int(bid_wall + 1)
+        my_ask = int(ask_wall - 1)
+
+        for bp in sorted(self.bids, reverse=True):
+            overbid = bp + 1
+            if abs(self.bids[bp]) > 1 and overbid < wall_mid:
+                my_bid = max(my_bid, overbid)
+                break
+            elif bp < wall_mid:
+                my_bid = max(my_bid, bp)
+                break
+
+        for sp in sorted(self.asks):
+            undercut = sp - 1
+            if abs(self.asks[sp]) > 1 and undercut > wall_mid:
+                my_ask = min(my_ask, undercut)
+                break
+            elif sp > wall_mid:
+                my_ask = min(my_ask, sp)
+                break
+
+        # Inventory skew: shift quotes asymmetrically toward flattening position.
+        # If long: push ask down (easier to sell) and bid down more (harder to buy more).
+        # If short: push bid up (easier to buy) and ask up more (harder to sell more).
+        if abs(self.skew) > self.SKEW_THRESHOLD:
+            offset = round(self.skew * self.MAX_SKEW_OFFSET)
+            my_bid -= offset * 2  # harder to add to position
+            my_ask -= offset      # easier to reduce position
+
+        # Enforce minimum edge from fair value
+        my_bid = min(my_bid, int(fv - self.MIN_EDGE))
+        my_ask = max(my_ask, int(fv + self.MIN_EDGE))
+
+        self._buy(my_bid,  self.MAKE_SIZE, "mm_bid")
+        self._sell(my_ask, self.MAKE_SIZE, "mm_ask")
+
+        self.log("edge_bid", round(fv - my_bid, 1))
+        self.log("edge_ask", round(my_ask - fv, 1))
+
+    # ── Entry point ───────────────────────────────────────────────────────
 
     def get_orders(self) -> List[Order]:
-        raise NotImplementedError
+        fv = self.fair_value()
+        if fv is None:
+            return self.orders
+        self.take_orders(fv)
+        self.make_orders(fv)
+        return self.orders
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  EMERALDS — Static asset pinned at 10,000
-#  Strategy: Frankfurt Hedgehogs StaticTrader style
-#  - Take anything crossing the known fair value (wall_mid)
-#  - Flatten inventory at wall_mid (0-edge but reduces risk)
-#  - Post passive quotes inside the walls with overbidding/undercutting
+#  EMERALDS — Stable asset, fixed fair value at 10,000
 # ═══════════════════════════════════════════════════════════════════════════
 
 class EmeraldsTrader(ProductTrader):
 
-    PRODUCT = "EMERALDS"
+    PRODUCT   = "EMERALDS"
     POS_LIMIT = 80
+    FAIR_VALUE_FIXED = 10_000
 
-    def __init__(self, state: TradingState) -> None:
-        super().__init__(state, self.PRODUCT)
+    # Tighter edge is fine given the fixed fair value
+    MIN_EDGE  = 1
+    MAKE_SIZE = 40
 
-    def get_orders(self) -> List[Order]:
-        if self.wall_mid is None or self.bid_wall is None or self.ask_wall is None:
-            return self.orders
-
-        # ── 1. TAKING ──────────────────────────────────────────────────────
-        for ask_price in sorted(self.asks.keys()):
-            ask_vol = abs(self.asks[ask_price])
-            if ask_price <= self.wall_mid - 1 and self.max_buy > 0:
-                qty = min(ask_vol, self.max_buy)
-                self.orders.append(Order(self.product, ask_price, qty))
-                self.max_buy -= qty
-            elif ask_price <= self.wall_mid and self.position < 0:
-                qty = min(ask_vol, abs(self.position), self.max_buy)
-                if qty > 0:
-                    self.orders.append(Order(self.product, ask_price, qty))
-                    self.max_buy -= qty
-
-        for bid_price in sorted(self.bids.keys(), reverse=True):
-            bid_vol = abs(self.bids[bid_price])
-            if bid_price >= self.wall_mid + 1 and self.max_sell > 0:
-                qty = min(bid_vol, self.max_sell)
-                self.orders.append(Order(self.product, bid_price, -qty))
-                self.max_sell -= qty
-            elif bid_price >= self.wall_mid and self.position > 0:
-                qty = min(bid_vol, self.position, self.max_sell)
-                if qty > 0:
-                    self.orders.append(Order(self.product, bid_price, -qty))
-                    self.max_sell -= qty
-
-        # ── 2. MAKING ─────────────────────────────────────────────────────
-        bid_price = int(self.bid_wall + 1)
-        ask_price = int(self.ask_wall - 1)
-
-        for bp in sorted(self.bids.keys(), reverse=True):
-            bv = abs(self.bids[bp])
-            overbid = bp + 1
-            if bv > 1 and overbid < self.wall_mid:
-                bid_price = max(bid_price, overbid)
-                break
-            elif bp < self.wall_mid:
-                bid_price = max(bid_price, bp)
-                break
-
-        for sp in sorted(self.asks.keys()):
-            sv = abs(self.asks[sp])
-            undercut = sp - 1
-            if sv > 1 and undercut > self.wall_mid:
-                ask_price = min(ask_price, undercut)
-                break
-            elif sp > self.wall_mid:
-                ask_price = min(ask_price, sp)
-                break
-
-        if self.max_buy > 0:
-            self.orders.append(Order(self.product, bid_price, self.max_buy))
-        if self.max_sell > 0:
-            self.orders.append(Order(self.product, ask_price, -self.max_sell))
-
-        self.log("wall_mid", round(self.wall_mid, 1))
-        self.log("mm_bid", bid_price)
-        self.log("mm_ask", ask_price)
-
-        return self.orders
+    def fair_value(self) -> float:
+        return self.FAIR_VALUE_FIXED
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  TOMATOES — Dynamic asset (random walk with drift + mean-reverting ticks)
-#
-#  Analysis summary:
-#    - Wall spread: consistently 16 ticks (walls at level 2, ~20 lots each)
-#    - Inner spread: 13-14 ticks (level 1, ~7 lots, sits 1 tick inside walls)
-#    - Wall mid drifts like a random walk (no trend to exploit)
-#    - Tick returns autocorrelation: -0.21 (mean reversion at tick level)
-#    - Trade quantities: 2-5 (uniform), no informed-bot signature found
-#
-#  Strategy (adapted from Frankfurt Hedgehogs' Kelp + Static approaches):
-#    1. TAKING: Frankfurt-style — take anything crossing wall_mid +/- 1,
-#       flatten inventory at wall_mid (position-aware)
-#    2. MAKING: Post passive quotes inside the spread, using overbidding/
-#       undercutting with inventory skew to manage drift risk.
-#       Unlike Emeralds, we can't assume a fixed fair value, so all quotes
-#       are anchored to wall_mid which moves each tick.
-#
-#  Backtested PnL (Round 0):
-#    Day -2: ~9,900   Day -1: ~6,300   Total: ~16,200
-#    Combined with Emeralds: ~31,100  (Sharpe ~7.1)
+#  TOMATOES — Dynamic asset, fair value tracks wall_mid
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TomatoesTrader(ProductTrader):
 
-    PRODUCT = "TOMATOES"
+    PRODUCT   = "TOMATOES"
     POS_LIMIT = 80
 
-    # ── Tunable parameters ─────────────────────────────────────────────
-    SKEW_THRESHOLD = 0.4     # start skewing quotes at 40% of limit (pos ~32)
-    AGGR_THRESHOLD = 0.75    # aggressively flush at 75% (pos ~60)
-    MAX_SKEW_OFFSET = 2      # max ticks to shift quotes for inventory
-    MAKE_SIZE = 20           # size per passive quote side
-    MIN_EDGE = 3             # minimum ticks of edge from wall_mid to post
+    MAKE_SIZE        = 20
+    MIN_EDGE         = 3  # enforced in base make_orders against fair_value(); inner spread can compress to ~5 ticks so 3 covers the worst case
+    SKEW_THRESHOLD   = 0.4
+    MAX_SKEW_OFFSET  = 2
 
-    def __init__(self, state: TradingState) -> None:
-        super().__init__(state, self.PRODUCT)
+    EMA_FAST = 50
+    EMA_SLOW = 200
 
-    def get_orders(self) -> List[Order]:
-        if self.wall_mid is None or self.bid_wall is None or self.ask_wall is None:
-            return self.orders
+    def __init__(self, state: TradingState, memory: dict) -> None:
+        super().__init__(state)
+        price = self.wall_mid if self.wall_mid is not None else 0.0
 
-        self.log("wall_mid", round(self.wall_mid, 1))
-        self.log("wall_spread", int(self.ask_wall - self.bid_wall))
+        prev_fast = memory.get("tom_ema_fast", price)
+        prev_slow = memory.get("tom_ema_slow", price)
 
-        # ══════════════════════════════════════════════════════════════════
-        #  1. MARKET TAKING  (Frankfurt Hedgehogs style)
-        #
-        #  wall_mid is our fair value proxy. Any order book level that
-        #  crosses wall_mid +/- 1 is free edge — take it immediately.
-        #  If we have inventory, flatten at wall_mid (0 edge, risk reduction).
-        # ══════════════════════════════════════════════════════════════════
+        k_fast = 2 / (self.EMA_FAST + 1)
+        k_slow = 2 / (self.EMA_SLOW + 1)
 
-        for ask_price in sorted(self.asks.keys()):
-            ask_vol = abs(self.asks[ask_price])
-            if ask_price <= self.wall_mid - 1 and self.max_buy > 0:
-                qty = min(ask_vol, self.max_buy)
-                self.log("take_buy", f"{qty}@{ask_price}")
-                self.orders.append(Order(self.product, ask_price, qty))
-                self.max_buy -= qty
-            elif ask_price <= self.wall_mid and self.position < 0:
-                qty = min(ask_vol, abs(self.position), self.max_buy)
-                if qty > 0:
-                    self.log("flatten_buy", f"{qty}@{ask_price}")
-                    self.orders.append(Order(self.product, ask_price, qty))
-                    self.max_buy -= qty
+        self.ema_fast = prev_fast + k_fast * (price - prev_fast)
+        self.ema_slow = prev_slow + k_slow * (price - prev_slow)
 
-        for bid_price in sorted(self.bids.keys(), reverse=True):
-            bid_vol = abs(self.bids[bid_price])
-            if bid_price >= self.wall_mid + 1 and self.max_sell > 0:
-                qty = min(bid_vol, self.max_sell)
-                self.log("take_sell", f"{qty}@{bid_price}")
-                self.orders.append(Order(self.product, bid_price, -qty))
-                self.max_sell -= qty
-            elif bid_price >= self.wall_mid and self.position > 0:
-                qty = min(bid_vol, self.position, self.max_sell)
-                if qty > 0:
-                    self.log("flatten_sell", f"{qty}@{bid_price}")
-                    self.orders.append(Order(self.product, bid_price, -qty))
-                    self.max_sell -= qty
+        memory["tom_ema_fast"] = self.ema_fast
+        memory["tom_ema_slow"] = self.ema_slow
 
-        # ══════════════════════════════════════════════════════════════════
-        #  2. MARKET MAKING
-        #
-        #  The Tomatoes book typically has:
-        #    ask_wall (level 2)  ~20 lots
-        #    best_ask (level 1)  ~7 lots     ← 1 tick inside wall
-        #    ──── ~13 tick inner spread ────
-        #    best_bid (level 1)  ~7 lots     ← 1 tick inside wall
-        #    bid_wall (level 2)  ~20 lots
-        #
-        #  We overbid/undercut to get queue priority, then apply inventory
-        #  skew to lean toward flattening. MIN_EDGE=3 ensures we always
-        #  have at least 3 ticks of edge from the fair value proxy.
-        # ══════════════════════════════════════════════════════════════════
+        self.log("ema_fast", round(self.ema_fast, 2))
+        self.log("ema_slow", round(self.ema_slow, 2))
+        self.log("trend", "up" if self.ema_fast > self.ema_slow else "down")
 
-        if self.best_bid is None or self.best_ask is None:
-            return self.orders
-
-        # ── Aggressive inventory flush ────────────────────────────────
-        if abs(self.skew) > self.AGGR_THRESHOLD:
-            if self.skew > 0 and self.max_sell > 0:
-                qty = min(self.MAKE_SIZE, self.max_sell)
-                self.log("aggr_sell", f"{qty}@{self.best_bid}")
-                self.orders.append(Order(self.product, self.best_bid, -qty))
-                self.max_sell -= qty
-            elif self.skew < 0 and self.max_buy > 0:
-                qty = min(self.MAKE_SIZE, self.max_buy)
-                self.log("aggr_buy", f"{qty}@{self.best_ask}")
-                self.orders.append(Order(self.product, self.best_ask, qty))
-                self.max_buy -= qty
-            return self.orders
-
-        # ── Compute inventory skew offset ────────────────────────────
-        if abs(self.skew) > self.SKEW_THRESHOLD:
-            skew_offset = round(self.skew * self.MAX_SKEW_OFFSET)
-        else:
-            skew_offset = 0
-
-        # ── Base quote prices: overbid / undercut ────────────────────
-        base_bid = int(self.bid_wall + 1)
-        base_ask = int(self.ask_wall - 1)
-
-        for bp in sorted(self.bids.keys(), reverse=True):
-            bv = abs(self.bids[bp])
-            overbid = bp + 1
-            if bv > 1 and overbid < self.wall_mid:
-                base_bid = max(base_bid, overbid)
-                break
-            elif bp < self.wall_mid:
-                base_bid = max(base_bid, bp)
-                break
-
-        for sp in sorted(self.asks.keys()):
-            sv = abs(self.asks[sp])
-            undercut = sp - 1
-            if sv > 1 and undercut > self.wall_mid:
-                base_ask = min(base_ask, undercut)
-                break
-            elif sp > self.wall_mid:
-                base_ask = min(base_ask, sp)
-                break
-
-        # ── Apply skew offset ────────────────────────────────────────
-        my_bid = base_bid - skew_offset
-        my_ask = base_ask - skew_offset
-
-        # ── Safety: enforce minimum edge from wall_mid ───────────────
-        max_bid = int(self.wall_mid - self.MIN_EDGE)
-        min_ask = int(self.wall_mid + self.MIN_EDGE)
-        if self.wall_mid % 1 == 0.5:
-            max_bid = int(self.wall_mid - 0.5) - self.MIN_EDGE + 1
-            min_ask = int(self.wall_mid + 0.5) + self.MIN_EDGE - 1
-
-        my_bid = min(my_bid, max_bid)
-        my_ask = max(my_ask, min_ask)
-
-        # Ensure we never cross our own quotes
-        if my_bid >= my_ask:
-            my_bid = int(self.wall_mid) - 1
-            my_ask = int(self.wall_mid) + 1
-            if my_bid >= my_ask:
-                my_ask = my_bid + 2
-
-        # ── Post passive quotes ──────────────────────────────────────
-        if self.max_buy > 0:
-            qty = min(self.MAKE_SIZE, self.max_buy)
-            self.log("mm_bid", f"{qty}@{my_bid}")
-            self.orders.append(Order(self.product, my_bid, qty))
-
-        if self.max_sell > 0:
-            qty = min(self.MAKE_SIZE, self.max_sell)
-            self.log("mm_ask", f"{qty}@{my_ask}")
-            self.orders.append(Order(self.product, my_ask, -qty))
-
-        self.log("edge_bid", round(self.wall_mid - my_bid, 1))
-        self.log("edge_ask", round(my_ask - self.wall_mid, 1))
-
-        return self.orders
+    def fair_value(self) -> Optional[float]:
+        if self.wall_mid is None:
+            return None
+        # Shift fair value in the direction of the trend by MAX_SKEW_OFFSET ticks
+        # Uptrend: FV shifts up → ask harder to fill, bid easier (we want to buy)
+        # Downtrend: FV shifts down → bid harder to fill, ask easier (we want to sell)
+        trend_offset = self.MAX_SKEW_OFFSET if self.ema_fast > self.ema_slow else -self.MAX_SKEW_OFFSET
+        return self.wall_mid + trend_offset
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  PRODUCT REGISTRY & MAIN TRADER
 # ═══════════════════════════════════════════════════════════════════════════
 
-PRODUCT_TRADERS = {
+PRODUCT_TRADERS: dict[str, type[ProductTrader]] = {
     "EMERALDS": EmeraldsTrader,
     "TOMATOES": TomatoesTrader,
 }
+
 
 class Trader:
 
@@ -346,22 +340,24 @@ class Trader:
             memory = jsonpickle.decode(state.traderData)
             if not isinstance(memory, dict):
                 memory = {}
-        except:
+        except Exception:
             memory = {}
 
-        result: dict[str, List[Order]] = {}
+        result: dict[str, list[Order]] = {}
 
         for symbol, trader_cls in PRODUCT_TRADERS.items():
             if symbol in state.order_depths:
                 try:
-                    trader = trader_cls(state)
+                    if symbol == "TOMATOES":
+                        trader = TomatoesTrader(state, memory)
+                    else:
+                        trader = trader_cls(state)
                     result[symbol] = trader.get_orders()
                 except Exception as e:
-                    logger.log(symbol, "error", str(e))
+                    logger.print(f"[{symbol}] error: {e}")
 
         memory["last_timestamp"] = state.timestamp
-        traderData = jsonpickle.encode(memory)
-        conversions = 0
+        trader_data = jsonpickle.encode(memory) or ""
 
-        logger.flush()
-        return result, conversions, traderData
+        logger.flush(state, result, 0, trader_data)
+        return result, 0, trader_data
