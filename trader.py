@@ -100,6 +100,9 @@ class ProductTrader:
             )
         }
 
+        self.bid_vol = sum(self.bids.values())
+        self.ask_vol = sum(self.asks.values())
+
         self.orders: List[Order] = []
 
         # Remaining capacity — decremented when we place orders
@@ -133,6 +136,28 @@ class ProductTrader:
             self.log("wall_mid", round(self.wall_mid, 1))
             self.log("wall_spread", int(self.ask_wall - self.bid_wall))
 
+    def _log_trades(self):
+        own = self.state.own_trades.get(self.PRODUCT, [])
+        mkt = self.state.market_trades.get(self.PRODUCT, [])
+
+        if own:
+            summary = [f"{t.price}x{t.quantity}({t.buyer}<<{t.seller})" for t in own]
+            self.log("own_trades", f"n={len(own)} {summary}")
+
+        if mkt:
+            summary = [f"{t.price}x{t.quantity}({t.buyer}<<{t.seller})" for t in mkt]
+            self.log("mkt_trades", f"n={len(mkt)} {summary}")
+
+            # Cumulative bot activity tracker (buys, sells, volumes) per bot ID
+            stats = self.memory.setdefault("bot_stats", {})
+            for t in mkt:
+                for bot_id, side in [(t.buyer, "buy"), (t.seller, "sell")]:
+                    if not bot_id:
+                        continue
+                    entry = stats.setdefault(bot_id, {"buy_qty": 0, "sell_qty": 0, "buys": 0, "sells": 0})
+                    entry[f"{side}s"] += 1
+                    entry[f"{side}_qty"] += t.quantity
+
     # ── Order book helpers ────────────────────────────────────────────────
 
     def _best_bid_ask(self) -> tuple[Optional[int], Optional[int]]:
@@ -149,9 +174,8 @@ class ProductTrader:
     # ── Fair value ────────────────────────────────────────────────────────
 
     def fair_value(self) -> Optional[float]:
-        """Default: wall_mid. Override in subclasses if needed."""
         return self.wall_mid
-
+ 
     # ── Order placement ───────────────────────────────────────────────────
 
     def _buy(self, price: int, qty: int, tag: str = "buy"):
@@ -182,18 +206,12 @@ class ProductTrader:
             ask_vol = self.asks[ask_price]
             if ask_price <= fv - 1:
                 self._buy(ask_price, ask_vol, "take_buy")
-            elif ask_price <= fv and self.position < 0:
-                qty = min(ask_vol, abs(self.position))
-                self._buy(ask_price, qty, "flatten_buy")
 
         # Sweep bids (sell when bid is rich)
         for bid_price in list(self.bids):
             bid_vol = self.bids[bid_price]
             if bid_price >= fv + 1:
                 self._sell(bid_price, bid_vol, "take_sell")
-            elif bid_price >= fv and self.position > 0:
-                qty = min(bid_vol, self.position)
-                self._sell(bid_price, qty, "flatten_sell")
 
     # ── Shared making logic ───────────────────────────────────────────────
     # Hedgehogs pattern: overbid/undercut inside the walls, full remaining
@@ -238,7 +256,7 @@ class ProductTrader:
 
     def get_orders(self) -> List[Order]:
         fv = self.fair_value()
-        if fv is None:
+        if fv is None or self.best_bid is None or self.best_ask is None:
             return self.orders
         self.take_orders(fv)
         self.make_orders(fv)
@@ -246,18 +264,24 @@ class ProductTrader:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  ASH_COATED_OSMIUM — Stable asset, fair value = wall_mid
+#  INTARIAN_PEPPER_ROOT — Stable growing asset
 # ═══════════════════════════════════════════════════════════════════════════
 
 class StableTrader(ProductTrader):
     PRODUCT   = "INTARIAN_PEPPER_ROOT"
     POS_LIMIT = 80
-    SLOPE = 0.001
 
-    def fair_value(self) -> Optional[float]:
-        if self.wall_mid is None:
-            return None
-        return self.wall_mid + self.SLOPE * self.state.timestamp
+    def get_orders(self) -> List[Order]:
+        if self.asks and self.max_buy > 0:
+            cheapest = min(self.asks)
+            vol = self.asks[cheapest]
+            self._buy(cheapest, min(vol, self.max_buy), "take_cheap")
+        
+        # Rest the rest at best_bid
+        if self.max_buy > 0 and self.best_bid is not None:
+            self._buy(self.best_bid, self.max_buy, "rest")
+        
+        return self.orders
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  ASH_COATED_OSMIUM — Pure market-making, flatten taking only
@@ -269,9 +293,17 @@ class DynamicTrader(ProductTrader):
 
     def fair_value(self) -> Optional[float]:
         return self.wall_mid
+    
+    def get_orders(self) -> List[Order]:
+        fv = self.fair_value()
+        if fv is None:
+            return self.orders
+        self.take_orders(fv)
+        self.make_orders(fv)
+        return self.orders
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  PRODUCT REGISTRY & MAIN TRADER
+#  PRODUCT TRADERS LIST
 # ═══════════════════════════════════════════════════════════════════════════
 
 PRODUCT_TRADERS: dict[str, type[ProductTrader]] = {
