@@ -176,6 +176,7 @@ class ProductTrader:
     def fair_value(self) -> Optional[float]:
         return self.wall_mid
  
+
     # ── Order placement ───────────────────────────────────────────────────
 
     def _buy(self, price: int, qty: int, tag: str = "buy"):
@@ -303,7 +304,7 @@ class DynamicTrader(ProductTrader):
         return self.orders
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  PRODUCT TRADERS LIST
+#  PRODUCT REGISTRY & MAIN TRADER
 # ═══════════════════════════════════════════════════════════════════════════
 
 PRODUCT_TRADERS: dict[str, type[ProductTrader]] = {
