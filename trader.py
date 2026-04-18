@@ -202,17 +202,19 @@ class ProductTrader:
     # flatten (cross at fair value itself) when holding opposite inventory.
 
     def take_orders(self, fv: float):
-        # Sweep asks (buy when ask is cheap)
         for ask_price in list(self.asks):
             ask_vol = self.asks[ask_price]
             if ask_price <= fv - 1:
                 self._buy(ask_price, ask_vol, "take_buy")
+            elif ask_price <= fv and self.position < 0:
+                self._buy(ask_price, min(ask_vol, -self.position), "flatten_buy")
 
-        # Sweep bids (sell when bid is rich)
         for bid_price in list(self.bids):
             bid_vol = self.bids[bid_price]
             if bid_price >= fv + 1:
                 self._sell(bid_price, bid_vol, "take_sell")
+            elif bid_price >= fv and self.position > 0:
+                self._sell(bid_price, min(bid_vol, self.position), "flatten_sell")
 
     # ── Shared making logic ───────────────────────────────────────────────
     # Hedgehogs pattern: overbid/undercut inside the walls, full remaining
