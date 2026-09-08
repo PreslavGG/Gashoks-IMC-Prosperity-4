@@ -1,8 +1,6 @@
 # macOS
 .DS_Store
 **/.DS_Store
-
-# other common ones worth adding
 node_modules/
 .env
 __pycache__/
