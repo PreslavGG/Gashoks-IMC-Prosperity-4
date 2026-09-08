@@ -13,14 +13,17 @@ Before the leaderboard reset after **Phase 1**, we were ranked:
 
 - **74th globally**
 
+<img width="1200" height="630" alt="The talented 10%" src="https://github.com/user-attachments/assets/68e185c6-f3be-46a7-b5d2-208d5f6872e2" />
+<img width="1200" height="630" alt="media-kit" src="https://github.com/user-attachments/assets/79e70195-c3e5-4675-af11-f99f686c5534" />
+
 ## What is IMC Prosperity 4?
 
-**IMC Prosperity 4** is IMC Trading's global trading competition. Teams compete in a simulated exchange by writing algorithmic traders and solving manual trading problems. The goal is to maximize profit and loss across several rounds while respecting product-specific position limits.
+**IMC Prosperity 4** is IMC Trading's global trading competition. Teams compete in a simulated exchange by writing algorithmic traders and solving manual trading problems. The goal is to maximize profit across several rounds while respecting product-specific position limits and trading in a simulated trading environment. Each round you are given a data file with the assets, their orderbooks each timestamp, price, and volume, and you have to come up with a trading strategy on your own.
 
 Each algorithmic submission implements a `Trader` class. At every timestamp, the trader receives the current market state, including:
 
 - order books for all active products,
-- recent own trades and market trades,
+- recent own trades and market trades (usually with hidden counterparty),
 - current positions,
 - observations,
 - persistent `traderData` from previous timestamps.
@@ -40,7 +43,7 @@ The trader then returns orders for each product. The challenge is not only to fi
 
 ## High-Level Strategy
 
-Our approach changed throughout the competition. The early rounds used simple market making and product-specific directional logic. Later rounds required more structured models, including option pricing, counterparty-flow analysis, pair relationships, basket relationships, and broad cross-product market making.
+Our approach changed throughout the competition. The early rounds used simple market making and product-specific directional logic. Later rounds required more structured models, including option pricing, counterparty-flow analysis, pairs trading, statistical arbitrage, and broad cross-product market making.
 
 The main principles across all traders were:
 
@@ -65,7 +68,7 @@ The first trader handled two products:
 
 `INTARIAN_PEPPER_ROOT` was treated as a stable product with a strong upward bias. The strategy was intentionally simple and aggressive:
 
-1. Buy the cheapest available asks.
+1. Buy the cheapest available asks early on.
 2. Continue accumulating until the position limit was reached.
 3. If capacity remained, place passive buy orders at the best bid.
 
@@ -79,7 +82,7 @@ The trader estimated fair value from the order book, especially from the outer w
 
 The strategy:
 
-- calculated a dynamic fair value from the book,
+- calculated a dynamic fair value from the book based on mean reversion,
 - used previous fair values stored in memory,
 - bought when asks were clearly cheap,
 - sold when bids were clearly expensive,
@@ -105,6 +108,8 @@ Rounds 3 and 4 introduced more complex products and relationships. The traded un
 - `VEV_5400`
 - `VEV_6000`
 - `VEV_6500`
+
+<img width="533" height="1600" alt="Code_Generated_Image (8)" src="https://github.com/user-attachments/assets/dcff1890-4ae3-483f-b17a-b72764c0f041" />
 
 The `VEV_*` products behaved like call options on `VELVETFRUIT_EXTRACT`, with the number in the product name representing the strike.
 
@@ -133,7 +138,9 @@ The trader used:
 
 This was useful because the visible order book alone was not always enough. The option chain contained structural information, and pricing the options relative to the underlying gave us better fair-value estimates.
 
-Some products were traded more actively than others. For example, `VEV_5500` was disabled because it was the only loser in one of our backtests. This was a recurring pattern in the competition: we preferred removing weak components over keeping every theoretical signal.
+Some products were traded more actively than others. For example, we didn't trade `VEV_5500` as it was the only loser in one of our backtests. This was a recurring pattern in the competition: we preferred removing weak components over keeping every theoretical signal.
+
+While we didn't manage to find this solution for round 3, we bounced back later in round 4 where we were given the same assets to trade.
 
 ### VELVETFRUIT_EXTRACT
 
@@ -148,7 +155,7 @@ The strategy combined:
 - mean-reversion against the EMA,
 - counterparty-flow signals.
 
-When the book showed strong and persistent imbalance, the trader shifted fair value in the direction of that pressure. When price moved too far from the slow EMA, the trader treated part of the move as mean-reverting.
+When the book showed strong and persistent imbalance, the trader shifted fair value in the direction of that pressure. When price moved too far from the slow EMA, the trader treated part of the move as mean-reverting. As you probably have seen, some of the top teams didn't use options pricing at all, but rather used the underlying as an OU process and estimated the parameters of it, reverse-engineering them from the price movements. Then, they priced the call options and made a lot of profit there from simple mispricings.
 
 ### HYDROGEL_PACK
 
@@ -160,11 +167,11 @@ We tracked the spread:
 HYDROGEL_PACK - 1.9 * VELVETFRUIT_EXTRACT
 ```
 
-The trader maintained an EMA of this spread and used deviations from the EMA as a fair-value adjustment. If Hydrogel became expensive relative to Velvetfruit Extract, the trader became more willing to sell Hydrogel. If it became cheap, the trader became more willing to buy.
+The trader maintained an EMA of this spread and used deviations from the EMA as a fair-value adjustment. If Hydrogel became expensive relative to Velvetfruit Extract, the trader became more willing to sell Hydrogel. If it became cheap, the trader became more willing to buy. 
 
 ### Counterparty Flow Signals
 
-A major part of the Round 3–4 trader was tracking named counterparties from market trades.
+A major part of the Round 4 trader was tracking named counterparties from market trades.
 
 The strategy assigned signals to trades involving participants such as:
 
@@ -176,21 +183,24 @@ The strategy assigned signals to trades involving participants such as:
 - `Mark 55`
 - `Mark 67`
 
-Some counterparties appeared to be informative for specific products. For example, a buy from one participant could be treated as bullish, while a sell from another could be treated as bullish or bearish depending on the historical behavior we observed.
+<img width="1024" height="507" alt="65b1215c-8da6-44e8-8b7e-4342d9eeb31f" src="https://github.com/user-attachments/assets/64e9f4b0-a117-4d69-9817-c927e1ebc39d" />
+<img width="1024" height="501" alt="3f0b8e17-7b68-481b-ba3f-75c35f97c90d" src="https://github.com/user-attachments/assets/980df7fd-ae42-48bb-98b8-9be86c0c587f" />
+<img width="1600" height="1143" alt="Code_Generated_Image (7)" src="https://github.com/user-attachments/assets/8af85022-e8a4-4312-b7bf-4164b8c93a03" />
 
-These signals were not permanent. They decayed over time, so the trader reacted to recent flow without letting old information dominate future decisions.
+
+Some counterparties appeared to be informative for specific products. For example, a buy from one participant could be treated as bullish, while a sell from another could be treated as bullish or bearish depending on the historical behavior we observed. However, the Marks only traded with each other, and when we got the information next timestamp that they did it was already too late. So, we came to the conclusion that we couldn't make any reasonable trades on their behavior and trades, and didn't implement this into our final trader for Round 4.
 
 ### Inventory Management
 
-The Round 3–4 trader adjusted both price and size based on current position.
+Instead, we spent most of the time in Round 4 making adjustments to the Round 3 trader to both price and size based on current position for the assets from Round 3 - `HYDROGEL_PACK` and `VELVETFRUIT_EXTRACT`.
 
-When inventory was near zero, it could quote both sides more freely. When inventory became large, it became more conservative and prioritized reducing exposure. This mattered especially for the VEV products, because option-like instruments could move quickly when the underlying shifted.
+When inventory was near zero, it could quote both sides more freely. When inventory became large, it became more conservative and prioritized reducing exposure. This mattered especially for the VEV products, because option-like instruments could move quickly when the underlying shifted. We market-maked all products available, except the deep OTM, and this skewing strategy yielded a large portion of our Phase 2 profits, making us climb up the ranks from our slow Round 3 start of Phase 2.
 
 ## Round 5 / Phase 2
 
 Implemented in [`trader_r5.py`](./trader_r5.py).
 
-Round 5 expanded the universe heavily. The final trader covered many products across multiple groups:
+Round 5 expanded the universe heavily. The final trader covered 50 products across 10 groups (ETFs / bundles):
 
 - `GALAXY_SOUNDS_*`
 - `SLEEP_POD_*`
@@ -203,7 +213,17 @@ Round 5 expanded the universe heavily. The final trader covered many products ac
 - `OXYGEN_SHAKE_*`
 - `SNACKPACK_*`
 
-At this stage, the safest approach was not to overfit every product individually. We used a reusable market-making framework for almost everything, then added pair overlays where they helped.
+We spent a ton of time here analysing the assets and their group movements.
+
+<img width="800" height="600" alt="Code_Generated_Image (6)" src="https://github.com/user-attachments/assets/5e185bd5-7709-477b-9672-7e1cea4079ab" />
+<img width="800" height="600" alt="Code_Generated_Image (5)" src="https://github.com/user-attachments/assets/e4e22275-102b-4cdf-8415-5478b673a0c4" />
+<img width="800" height="600" alt="Code_Generated_Image (4)" src="https://github.com/user-attachments/assets/3eb6d83a-a307-46a7-96b9-178c67d69312" />
+<img width="800" height="600" alt="Code_Generated_Image (3)" src="https://github.com/user-attachments/assets/778d308e-bb7e-4e38-8313-5bbce6c1b5d3" />
+<img width="1440" height="1600" alt="Code_Generated_Image (2)" src="https://github.com/user-attachments/assets/2e9436f3-847a-4b23-a55f-f289cee37473" />
+<img width="1500" height="800" alt="Code_Generated_Image (1)" src="https://github.com/user-attachments/assets/b0e895b6-44a8-4848-aab2-9991fdd88cca" />
+
+We started off by using a market-making framework for passively quoting all the assets with skewing to capture any profits from the spread of the 50 assets.
+This surprisingly yielded only a small amount of the final profits. The largest profit here was made through capturing the Pebbles class had a sum of the assets in it of 50,000, and traded on it when there were mispricings, or the Pebble assets became too expensive or cheap relative to the group. See more details below:
 
 ### Generic Product Market Maker
 
@@ -258,9 +278,7 @@ For any one Pebbles product, the trader could estimate its implied fair value fr
 fair_value(product) = 50000 - sum(other_pebbles)
 ```
 
-This let us detect when one Pebbles product was cheap or expensive relative to the basket.
-
-In the final wiring, the general market maker with pair overlays was favored, while the basket logic remained available in the code as an explored strategy.
+This let us detect when one Pebbles product was cheap or expensive relative to the basket and made us the most profit in Round 5.
 
 ### Snackpack Experiments
 
