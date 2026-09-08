@@ -215,12 +215,7 @@ Round 5 expanded the universe heavily. The final trader covered 50 products acro
 
 We spent a ton of time here analysing the assets and their group movements.
 
-<img width="800" height="600" alt="Code_Generated_Image (6)" src="https://github.com/user-attachments/assets/5e185bd5-7709-477b-9672-7e1cea4079ab" />
-<img width="800" height="600" alt="Code_Generated_Image (5)" src="https://github.com/user-attachments/assets/e4e22275-102b-4cdf-8415-5478b673a0c4" />
-<img width="800" height="600" alt="Code_Generated_Image (4)" src="https://github.com/user-attachments/assets/3eb6d83a-a307-46a7-96b9-178c67d69312" />
-<img width="800" height="600" alt="Code_Generated_Image (3)" src="https://github.com/user-attachments/assets/778d308e-bb7e-4e38-8313-5bbce6c1b5d3" />
 <img width="1440" height="1600" alt="Code_Generated_Image (2)" src="https://github.com/user-attachments/assets/2e9436f3-847a-4b23-a55f-f289cee37473" />
-<img width="1500" height="800" alt="Code_Generated_Image (1)" src="https://github.com/user-attachments/assets/b0e895b6-44a8-4848-aab2-9991fdd88cca" />
 
 We started off by using a market-making framework for passively quoting all the assets with skewing to capture any profits from the spread of the 50 assets.
 This surprisingly yielded only a small amount of the final profits. The largest profit here was made through capturing the Pebbles class had a sum of the assets in it of 50,000, and traded on it when there were mispricings, or the Pebble assets became too expensive or cheap relative to the group. See more details below:
@@ -244,6 +239,12 @@ This framework was intentionally simple. In a large product universe, a stable m
 ### Pair Relative Trading
 
 For selected products, we added a `PairRelativeTrader`. This did not fully replace market making. Instead, it slightly adjusted fair value using pressure from a related product.
+
+<img width="800" height="600" alt="Code_Generated_Image (4)" src="https://github.com/user-attachments/assets/3eb6d83a-a307-46a7-96b9-178c67d69312" />
+<img width="800" height="600" alt="Code_Generated_Image (3)" src="https://github.com/user-attachments/assets/778d308e-bb7e-4e38-8313-5bbce6c1b5d3" />
+<img width="800" height="600" alt="Code_Generated_Image (5)" src="https://github.com/user-attachments/assets/e4e22275-102b-4cdf-8415-5478b673a0c4" />
+<img width="800" height="600" alt="Code_Generated_Image (6)" src="https://github.com/user-attachments/assets/5e185bd5-7709-477b-9672-7e1cea4079ab" />
+
 
 The active pairs were:
 
