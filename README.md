@@ -7,7 +7,7 @@ This repository contains our algorithmic trading submissions for **IMC Prosperit
 Our final result after **Phase 2**:
 
 - **3rd place in Italy**
-- **238th place globally**
+- **238th place globally out of 19,000 teams and 30,000+ participants**
 
 Before the leaderboard reset after **Phase 1**, we were ranked:
 
